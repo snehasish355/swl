@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Local schedule adapter for the SWL Band Finder.
+
+It fetches public schedule pages from Short-Wave.Info, extracts their result
+table, and serves JSON to the local HTML UI. The listener is bound to loopback
+only; query parameters are allow-listed and cannot select arbitrary URLs.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+HOST = "127.0.0.1"
+PORT = 8765
+ROOT = Path(__file__).resolve().parent
+BASE = "https://www.short-wave.info/index.php"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
+QUERY_KEYS = {"band", "freq", "station", "language", "txsite"}
+
+
+def clean(value: str) -> str:
+    return " ".join(value.replace("\u2009", " ").replace("\xa0", " ").split())
+
+
+class ResultsParser(HTMLParser):
+    """Extract the known `table#output` fields without retaining remote markup."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.in_output = False
+        self.row: dict | None = None
+        self.cell_index: int | None = None
+        self.cell_text: list[str] = []
+        self.cells: list[str] = []
+        self.links: list[dict[str, str]] = []
+        self.link: dict[str, str] | None = None
+        self.records: list[dict] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        a = dict(attrs)
+        if tag == "table" and a.get("id") == "output":
+            self.in_output = True
+            return
+        if not self.in_output:
+            return
+        if tag == "tr" and (a.get("id") or "").startswith("row") and a.get("id") != "rowZ":
+            self.row = {
+                "on_air": "onair" in (a.get("class") or "").split(),
+                "lat": None,
+                "lon": None,
+            }
+            match = re.search(r"cross\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)", a.get("onmouseover") or "")
+            if match:
+                self.row["lat"], self.row["lon"] = map(float, match.groups())
+            self.cells = []
+            self.links = []
+        elif tag == "td" and self.row is not None:
+            self.cell_index = len(self.cells)
+            self.cell_text = []
+        elif tag == "a" and self.cell_index is not None:
+            self.link = {"href": a.get("href") or "", "text": ""}
+        elif tag == "div" and self.cell_index == 8 and self.row is not None:
+            classes = (a.get("class") or "").split()
+            self.row["country_code"] = next((c for c in classes if c != "flag"), a.get("title", ""))
+
+    def handle_data(self, data: str) -> None:
+        if self.cell_index is not None:
+            self.cell_text.append(data)
+        if self.link is not None:
+            self.link["text"] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self.in_output:
+            return
+        if tag == "a" and self.link is not None:
+            self.link["text"] = clean(self.link["text"])
+            self.links.append(self.link)
+            self.link = None
+        elif tag == "td" and self.cell_index is not None:
+            self.cells.append(clean("".join(self.cell_text)))
+            self.cell_index = None
+        elif tag == "tr" and self.row is not None:
+            self._finish_row()
+            self.row = None
+        elif tag == "table":
+            self.in_output = False
+
+    def _finish_row(self) -> None:
+        if len(self.cells) < 9:
+            return
+        cells = self.cells
+        freq_match = re.search(r"\d+(?:\.\d+)?", cells[0])
+        power_match = re.search(r"\d+(?:\.\d+)?", cells[6])
+        freq_link = next((x["href"] for x in self.links if "freq=" in x["href"]), "")
+        station_link = next((x["href"] for x in self.links if "station=" in x["href"]), "")
+        language_links = [x["href"] for x in self.links if "language=" in x["href"]]
+        site_link = next((x["href"] for x in self.links if "txsite=" in x["href"]), "")
+        site_anchor = next((x["text"] for x in self.links if "txsite=" in x["href"]), "")
+        languages = [x["text"] for x in self.links if "language=" in x["href"]]
+        record = {
+            **self.row,
+            "frequency_khz": float(freq_match.group()) if freq_match else None,
+            "station": cells[1],
+            "start_utc": cells[2],
+            "end_utc": cells[3],
+            "days": cells[4],
+            "language": ", ".join(languages) if languages else cells[5],
+            "power_kw": float(power_match.group()) if power_match else None,
+            "azimuth": cells[7] or "?",
+            "site": clean((site_anchor or cells[8]).split("Latitude:", 1)[0]),
+            "country_code": self.row.get("country_code", ""),
+            "frequency_link": urllib.parse.urljoin(BASE, freq_link) if freq_link else "",
+            "station_link": urllib.parse.urljoin(BASE, station_link) if station_link else "",
+            "language_links": [urllib.parse.urljoin(BASE, x) for x in language_links],
+            "site_link": urllib.parse.urljoin(BASE, site_link) if site_link else "",
+        }
+        if record["frequency_khz"] and record["station"]:
+            self.records.append(record)
+
+
+def fetch_schedule(params: dict[str, str]) -> dict:
+    query = {k: v for k, v in params.items() if k in QUERY_KEYS and v}
+    if len(query) != 1:
+        raise ValueError("Choose exactly one search: band, frequency, station, language, or transmitter site.")
+    if "band" in query and not re.fullmatch(r"(?:120|90|75|60|49|41|31|25|22|19|16|15|13|11)m", query["band"]):
+        raise ValueError("Unknown broadcast band.")
+    if "freq" in query:
+        try:
+            freq = float(query["freq"])
+        except ValueError as exc:
+            raise ValueError("Frequency must be in kHz.") from exc
+        if not 100 <= freq <= 30000:
+            raise ValueError("Frequency must be between 100 and 30000 kHz.")
+        query["freq"] = str(freq).rstrip("0").rstrip(".") if "." in str(freq) else str(int(freq))
+        if params.get("porm") == "5":
+            query["porm"] = "5"
+    key = next(iter(query))
+    query[key] = query[key][:120]
+    url = BASE + "?" + urllib.parse.urlencode(query)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        page = response.read(5_000_001)
+    if len(page) > 5_000_000:
+        raise RuntimeError("Schedule response was unexpectedly large.")
+    parser = ResultsParser()
+    try:
+        html = page.decode("utf-8")
+    except UnicodeDecodeError:
+        html = page.decode("cp1252", "replace")
+    parser.feed(html)
+    return {"source": url, "count": len(parser.records), "stations": parser.records}
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "SWLBandFinder/1.0"
+
+    def log_message(self, fmt: str, *args) -> None:
+        print("[swl] " + fmt % args)
+
+    def send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/" or parsed.path == "/index.html":
+            try:
+                body = (ROOT / "index.html").read_bytes()
+            except OSError:
+                self.send_error(500, "index.html is missing")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/api/schedule":
+            params = {k: values[0] for k, values in urllib.parse.parse_qs(parsed.query).items() if values}
+            try:
+                self.send_json(200, fetch_schedule(params))
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+            except urllib.error.HTTPError as exc:
+                self.send_json(502, {"error": f"Short-Wave.Info returned HTTP {exc.code}."})
+            except (urllib.error.URLError, TimeoutError) as exc:
+                self.send_json(502, {"error": f"Could not reach Short-Wave.Info: {exc}"})
+            except Exception as exc:  # keep error responses useful to the UI
+                self.send_json(500, {"error": str(exc)})
+            return
+        self.send_error(404)
+
+
+def main() -> None:
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server.daemon_threads = True
+    print(f"SWL Band Finder is running at http://{HOST}:{PORT}/")
+    print("Keep this window open while using the app. Press Ctrl+C to stop.")
+    threading.Timer(1.0, lambda: webbrowser.open(f"http://{HOST}:{PORT}/")).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping SWL Band Finder.")
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
+
