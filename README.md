@@ -17,6 +17,7 @@ The helper serves the page at `http://127.0.0.1:8765/` and opens it in your brow
 - Searches Short-Wave.Info by broadcast band, frequency, station, language, or transmitter site.
 - Converts the schedule response into readable station cards with frequency, station, language, UTC hours, transmitter power, site, country flag, coordinates, azimuth, and distance.
 - Calculates the initial bearing from each transmitter to the listener and compares it with the listed transmit azimuth.
+- Filters schedule cards by transmitter country, on-air status, and whether the listed beam azimuth is within the assumed width toward your location. The shortlist is a useful starting point, not a reception guarantee.
 - Shows a selectable, adjustable-width directional sector and great-circle path for each transmitter that has coordinates and a directional azimuth.
 
 ## Map and beam interpretation
@@ -28,4 +29,5 @@ The map uses OpenStreetMap tiles and requires an internet connection. Map tiles 
 ## Privacy and network behavior
 
 The server binds only to `127.0.0.1` (this computer). It has no login, telemetry, or data storage. It fetches public schedule pages from `www.short-wave.info` and extracts only schedule table fields. The browser loads Leaflet from unpkg and OpenStreetMap tiles for map display.
+
 
