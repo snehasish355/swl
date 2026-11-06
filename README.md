@@ -5,10 +5,10 @@ A personal shortwave listening dashboard with band recommendations, an antenna s
 ## Run on Windows
 
 1. Install Python 3 if it is not already installed.
-2. Double-click `Start-SWL-Band-Finder.bat`.
+2. Double-click `Start-SWL-Band-Finder.bat`. It stops an existing SWL helper on ports 8765 or 9080 before starting the new one.
 3. Leave the console window open while using the page. Press `Ctrl+C` in that window to stop the local helper.
 
-The helper serves the page at `http://127.0.0.1:8765/` and opens it in your browser. It uses only Python's standard library. No Python packages need to be installed. On first launch it creates `schedule.sqlite3` beside the app and refreshes the full Shortwave.am and Shortwave.live schedules. The database stays on your computer; it is not included in GitHub.
+The helper serves the page at `http://127.0.0.1:9080/` and opens it in your browser. It uses only Python's standard library. No Python packages need to be installed. On first launch it creates `schedule.sqlite3` beside the app and refreshes the full Shortwave.am and Shortwave.live schedules. The database stays on your computer; it is not included in GitHub.
 
 ## What it does
 

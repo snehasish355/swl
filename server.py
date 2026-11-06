@@ -24,7 +24,7 @@ from pathlib import Path
 import schedule_db
 
 HOST = "127.0.0.1"
-PORT = 8765
+PORT = 9080
 ROOT = Path(__file__).resolve().parent
 BASE = "https://www.short-wave.info/index.php"
 USER_AGENT = (
@@ -330,6 +330,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/update":
             started = start_refresh()
             self.send_json(202, {"running": refresh_running, "started": started, "status": schedule_db.status()})
+            return
+        if parsed.path == "/api/shutdown":
+            self.send_json(200, {"stopping": True})
+            threading.Thread(target=self.server.shutdown, name="server-shutdown", daemon=True).start()
             return
         self.send_error(404)
 
