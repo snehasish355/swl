@@ -23,6 +23,8 @@ DB_PATH = schedule_db.DB_PATH
 FM_PAGE = "https://en.wikipedia.org/wiki/FM_broadcasting_in_India"
 AIR_PAGE = "https://en.wikipedia.org/wiki/All_India_Radio"
 BANGLADESH_PAGE = "https://en.wikipedia.org/wiki/Bangladesh_Betar"
+AIR_TRANSMITTERS_PAGE = "https://prasarbharati.gov.in/wp-content/uploads/2024/04/19-LIST-OF-EXISTING-STATIONS-AND-TRANSMITTERS-310723.pdf"
+AIR_VIVIDH_BHARATI_PAGE = "https://prasarbharati.gov.in/en/vividh-bharati/"
 REST_HTML = "https://en.wikipedia.org/api/rest_v1/page/html/"
 API = "https://en.wikipedia.org/w/api.php"
 UA = "SWL-Band-Finder/1.0 (personal local radio catalogue)"
@@ -174,6 +176,25 @@ def _record(mode: str, station: str, city: str, state: str, freq_khz: float,
     return {"mode": mode, "record_key": key, "station": station, "city": city,
             "state": state, "frequency_khz": round(freq_khz, 3), "station_url": station_url,
             "page_url": page_url, "details": details, "data_quality": "Wikipedia seed · verify on air"}
+
+
+def _official_kolkata_fm() -> list[dict]:
+    """Prasar Bharati-listed Kolkata AIR FM services and frequencies."""
+    entries = [
+        ("Akashvani Kolkata · FM Gold", 100100.0, AIR_TRANSMITTERS_PAGE,
+         "Kolkata transmitter · 20 kW FM Gold · Prasar Bharati existing-stations list (dated 31 July 2023)."),
+        ("Akashvani Kolkata · Vividh Bharati", 101800.0, AIR_VIVIDH_BHARATI_PAGE,
+         "Kolkata · 20 kW FM · Prasar Bharati Vividh Bharati centres listing."),
+        ("Akashvani Kolkata · FM Rainbow", 107000.0, AIR_TRANSMITTERS_PAGE,
+         "Kolkata transmitter · 20 kW FM Rainbow · Prasar Bharati existing-stations list (dated 31 July 2023)."),
+    ]
+    rows = []
+    for station, frequency, source, details in entries:
+        row = _record("FM", station, "Kolkata", "West Bengal", frequency,
+                      source, source, details)
+        row["data_quality"] = "Prasar Bharati listing · official source"
+        rows.append(row)
+    return rows
 
 
 def _city_state(heading: str) -> tuple[str, str]:
@@ -396,6 +417,13 @@ def refresh() -> dict:
             remaining_fm_rows.append(row)
     fm_rows = remaining_fm_rows
     records = fm_rows + air_rows + bd_rows
+    official_kolkata_freqs = {100100.0, 101800.0, 107000.0}
+    records = [row for row in records if not (
+        row["mode"] == "FM" and row["city"].casefold() == "kolkata" and
+        row["frequency_khz"] in {100100.0, 100200.0, 100300.0, *official_kolkata_freqs} and
+        row["data_quality"].startswith("Wikipedia seed") and
+        re.search(r"\bAIR\b|Akashvani|Akashwani", row["station"], re.I))]
+    records.extend(_official_kolkata_fm())
     # Keep the old cache intact if upstream structure changes or parsing fails.
     if len(records) < 10:
         raise RuntimeError(f"Wikipedia pages yielded only {len(records)} usable radio records; keeping prior catalogue")
@@ -450,7 +478,9 @@ def search(mode: str, query: str = "") -> list[dict]:
     results = []
     for row in rows:
         result = dict(row)
-        result["source_label"] = ("All India Radio article" if row["page_url"] == AIR_PAGE else
+        result["source_label"] = ("Prasar Bharati transmitter list" if row["page_url"] == AIR_TRANSMITTERS_PAGE else
+                                  "Prasar Bharati Vividh Bharati listing" if row["page_url"] == AIR_VIVIDH_BHARATI_PAGE else
+                                  "All India Radio article" if row["page_url"] == AIR_PAGE else
                                   "FM broadcasting in India" if "fm_broadcasting_in_india" in row["page_url"].casefold() else
                                   "Bangladesh Betar article")
         result["frequency_display"] = (f"{row['frequency_khz']/1000:g} MHz" if mode == "FM"
