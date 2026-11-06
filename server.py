@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,6 +19,8 @@ import webbrowser
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import schedule_db
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -130,7 +133,7 @@ class ResultsParser(HTMLParser):
             self.records.append(record)
 
 
-def fetch_schedule(params: dict[str, str]) -> dict:
+def fetch_shortwave_info(params: dict[str, str]) -> dict:
     query = {k: v for k, v in params.items() if k in QUERY_KEYS and v}
     if len(query) != 1:
         raise ValueError("Choose exactly one search: band, frequency, station, language, or transmitter site.")
@@ -163,6 +166,8 @@ def fetch_schedule(params: dict[str, str]) -> dict:
     except UnicodeDecodeError:
         html = page.decode("cp1252", "replace")
     parser.feed(html)
+    for row in parser.records:
+        row["source_url"] = url
     return {"source": url, "count": len(parser.records), "stations": parser.records}
 
 
@@ -198,24 +203,82 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/schedule":
             params = {k: values[0] for k, values in urllib.parse.parse_qs(parsed.query).items() if values}
             try:
-                self.send_json(200, fetch_schedule(params))
+                # Short-Wave.Info has no public full-database export. Refresh only
+                # the requested search, with a persistent throttle, and keep its
+                # rows beside the complete local feeds from Shortwave.am/.live.
+                valid = schedule_db.query_schedule(params)
+                key, value = next((k, v) for k, v in params.items() if k in schedule_db.QUERY_KEYS)
+                query_key = f"{key}:{value.lower()}:{params.get('porm','')}"
+                if schedule_db.should_refresh_info(query_key):
+                    try:
+                        fresh = fetch_shortwave_info(params)
+                        schedule_db.save_shortwave_info(fresh["stations"], query_key)
+                        schedule_db.finish_info_query(query_key)
+                    except Exception as exc:
+                        schedule_db.finish_info_query(query_key, str(exc))
+                stations = schedule_db.query_schedule(params)
+                state = schedule_db.status()
+                source_counts = ", ".join(f"{name}: {state['sources'][name]['row_count']}" for name in ("shortwave.am", "shortwave.live", "short-wave.info") if state["sources"][name]["row_count"])
+                source_query = {key: value}
+                if key == "freq" and params.get("porm") == "5":
+                    source_query["porm"] = "5"
+                self.send_json(200, {"count": len(stations), "stations": stations,
+                                     "source": "local SQLite schedule cache", "source_counts": source_counts,
+                                     "source_url": BASE + "?" + urllib.parse.urlencode(source_query),
+                                     "database_updated": max((x["updated_at"] for x in state["sources"].values() if x["updated_at"]), default=""),
+                                     "refresh_running": refresh_running})
             except ValueError as exc:
                 self.send_json(400, {"error": str(exc)})
-            except urllib.error.HTTPError as exc:
-                self.send_json(502, {"error": f"Short-Wave.Info returned HTTP {exc.code}."})
-            except (urllib.error.URLError, TimeoutError) as exc:
-                self.send_json(502, {"error": f"Could not reach Short-Wave.Info: {exc}"})
             except Exception as exc:  # keep error responses useful to the UI
                 self.send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/status":
+            state = schedule_db.status()
+            state["refresh_running"] = refresh_running
+            self.send_json(200, state)
+            return
+        self.send_error(404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/api/update":
+            started = start_refresh()
+            self.send_json(202, {"running": refresh_running, "started": started, "status": schedule_db.status()})
             return
         self.send_error(404)
 
 
+refresh_lock = threading.Lock()
+refresh_running = False
+
+
+def refresh_worker() -> None:
+    global refresh_running
+    try:
+        schedule_db.update_full_sources()
+    finally:
+        with refresh_lock:
+            refresh_running = False
+
+
+def start_refresh() -> bool:
+    global refresh_running
+    with refresh_lock:
+        if refresh_running:
+            return False
+        refresh_running = True
+    threading.Thread(target=refresh_worker, name="schedule-refresh", daemon=True).start()
+    return True
+
+
 def main() -> None:
+    schedule_db.init_db()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     print(f"SWL Band Finder is running at http://{HOST}:{PORT}/")
     print("Keep this window open while using the app. Press Ctrl+C to stop.")
+    if not schedule_db.full_sources_are_fresh():
+        start_refresh()
     threading.Timer(1.0, lambda: webbrowser.open(f"http://{HOST}:{PORT}/")).start()
     try:
         server.serve_forever()
@@ -227,4 +290,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
