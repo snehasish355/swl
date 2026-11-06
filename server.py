@@ -94,6 +94,7 @@ def fetch_weather(lat: float, lon: float) -> dict:
         "visibility_m": current.get("visibility"),
         "clouds_pct": current.get("clouds"),
         "condition": condition.get("main", "Unknown"),
+        "icon": condition.get("icon", ""),
         "description": condition.get("description", "Current conditions"),
         "condition_id": condition_id,
         "storm_noise_risk": isinstance(condition_id, int) and 200 <= condition_id < 300,
