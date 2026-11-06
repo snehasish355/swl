@@ -239,8 +239,13 @@ def _frequency_tokens(text: str) -> list[tuple[float, str, str]]:
     # Most regional MW table cells contain only a bare kHz value.
     if not out:
         bare = _clean(text).replace(",", " ")
+        bare = re.sub(r"\s*(?:&|/|\band\b)\s*", " ", bare, flags=re.I)
         if re.fullmatch(r"\d{3,4}(?:\s+\d{3,4})*", bare):
             out = [(float(x), "khz", x) for x in bare.split()]
+        elif re.fullmatch(r"\d{2,3}\.\d+(?:\s+\d{2,3}\.\d+)*", bare):
+            # A few regional-table rows omit the MHz suffix despite listing
+            # an FM channel (for example, Jabalpur Vividh Bharati 102.9).
+            out = [(float(x) * 1000, "mhz", x) for x in bare.split()]
     return out
 
 
@@ -272,6 +277,31 @@ def parse_air(parser: ArticleParser, page_url: str) -> list[dict]:
                 records.append(_record(mode, f"Akashvani {station_label}", city, state,
                                        freq_khz, page_url,
                                        page_url, f"{row['heading']} · {freq_cell}"))
+    # The article's External services transmitter-site table contains
+    # additional MW frequencies, separate from its regional service lists.
+    # Include both the main-frequency and DRM columns when they specify MW.
+    for row in parser.rows:
+        if row["section"].casefold() != "external services":
+            continue
+        cells = row["cells"]
+        if len(cells) < 5 or cells[0].casefold() in {"location", ""}:
+            continue
+        site, _, state = _normalize_air_city(cells[0])
+        city_text = re.sub(r"\s*\([^)]*\)\s*", " ", cells[0]).strip()
+        city = re.split(r"[-/]", city_text)[0].strip()
+        city = re.sub(r"\s+(?:HPT|SPT)$", "", city, flags=re.I).strip()
+        state = INDIAN_CITY_STATES.get(city.casefold(), state)
+        for freq_cell in cells[3:5]:
+            for freq_khz, unit, raw in _frequency_tokens(freq_cell):
+                if unit == "mhz" or "fm" in raw.casefold():
+                    mode = "FM"
+                elif 150 <= freq_khz <= 1800:
+                    mode = "MW"
+                else:
+                    continue
+                records.append(_record(mode, f"Akashvani External Services · {site}", city,
+                                       state, freq_khz, page_url, page_url,
+                                       f"External services transmitter table · {freq_cell}"))
     return records
 
 
