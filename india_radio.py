@@ -274,7 +274,9 @@ def parse_air(parser: ArticleParser, page_url: str) -> list[dict]:
                     mode = "MW"
                 else:
                     continue
-                records.append(_record(mode, f"Akashvani {station_label}", city, state,
+                service = re.search(r"\((FM Rainbow|FM Gold|Vividh Bharati|Vividha Bharati|Rainbow FM)\)", place, re.I)
+                display_station = f"Akashvani {station_label} · {service.group(1)}" if service else f"Akashvani {station_label}"
+                records.append(_record(mode, display_station, city, state,
                                        freq_khz, page_url,
                                        page_url, f"{row['heading']} · {freq_cell}"))
     # The article's External services transmitter-site table contains
@@ -375,6 +377,24 @@ def refresh() -> dict:
     air_parser, air_url = _article("All India Radio")
     bd_parser, bd_url = _article("Bangladesh Betar")
     fm_rows, air_rows, bd_rows = parse_fm(fm_parser, fm_url), parse_air(air_parser, air_url), parse_bangladesh_betar(bd_parser, bd_url)
+    # The FM-broadcasting article repeats some AIR entries from AIR's own
+    # frequency tables. Keep AIR's row as the primary record and retain the
+    # other article's label in its details instead of showing a duplicate card.
+    air_by_key = {(r["mode"], r["city"].casefold(), r["frequency_khz"]): r
+                  for r in air_rows}
+    remaining_fm_rows = []
+    for row in fm_rows:
+        if not re.search(r"\bAIR\b|Akashvani|Akashwani", row["station"], re.I):
+            remaining_fm_rows.append(row)
+            continue
+        primary = air_by_key.get((row["mode"], row["city"].casefold(), row["frequency_khz"]))
+        if primary:
+            if row["station_url"] != row["page_url"]:
+                primary["station_url"] = row["station_url"]
+            primary["details"] += f" · Also listed as {row['station']} in FM broadcasting in India"
+        else:
+            remaining_fm_rows.append(row)
+    fm_rows = remaining_fm_rows
     records = fm_rows + air_rows + bd_rows
     # Keep the old cache intact if upstream structure changes or parsing fails.
     if len(records) < 10:
@@ -430,6 +450,9 @@ def search(mode: str, query: str = "") -> list[dict]:
     results = []
     for row in rows:
         result = dict(row)
+        result["source_label"] = ("All India Radio article" if row["page_url"] == AIR_PAGE else
+                                  "FM broadcasting in India" if "fm_broadcasting_in_india" in row["page_url"].casefold() else
+                                  "Bangladesh Betar article")
         result["frequency_display"] = (f"{row['frequency_khz']/1000:g} MHz" if mode == "FM"
                                        else f"{row['frequency_khz']:g} kHz")
         results.append(result)
