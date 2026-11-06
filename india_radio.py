@@ -26,6 +26,28 @@ BANGLADESH_PAGE = "https://en.wikipedia.org/wiki/Bangladesh_Betar"
 REST_HTML = "https://en.wikipedia.org/api/rest_v1/page/html/"
 API = "https://en.wikipedia.org/w/api.php"
 UA = "SWL-Band-Finder/1.0 (personal local radio catalogue)"
+INDIAN_CITY_STATES = {
+    "kolkata": "West Bengal", "asansol": "West Bengal", "siliguri": "West Bengal",
+    "santiniketan": "West Bengal", "bolpur": "West Bengal", "suri": "West Bengal",
+    "murshidabad": "West Bengal", "chinsurah": "West Bengal", "kurseong": "West Bengal",
+    "bhubaneswar": "Odisha", "cuttack": "Odisha", "balasore": "Odisha", "sambalpur": "Odisha",
+    "patna": "Bihar", "bhagalpur": "Bihar", "darbhanga": "Bihar", "muzaffarpur": "Bihar",
+    "ranchi": "Jharkhand", "jamshedpur": "Jharkhand", "dhanbad": "Jharkhand",
+    "delhi": "Delhi", "lucknow": "Uttar Pradesh", "agra": "Uttar Pradesh", "varanasi": "Uttar Pradesh",
+    "jaipur": "Rajasthan", "jodhpur": "Rajasthan", "udaipur": "Rajasthan", "ajmer": "Rajasthan",
+    "ahmedabad": "Gujarat", "rajkot": "Gujarat", "surat": "Gujarat", "mumbai": "Maharashtra",
+    "pune": "Maharashtra", "nagpur": "Maharashtra", "aurangabad": "Maharashtra",
+    "bengaluru": "Karnataka", "bangalore": "Karnataka", "chennai": "Tamil Nadu",
+    "coimbatore": "Tamil Nadu", "hyderabad": "Telangana", "guwahati": "Assam",
+    "agartala": "Tripura", "shillong": "Meghalaya", "imphal": "Manipur", "aizawl": "Mizoram",
+    "kohima": "Nagaland", "itanagar": "Arunachal Pradesh", "gangtok": "Sikkim",
+    "jalandhar": "Punjab", "amritsar": "Punjab", "chandigarh": "Chandigarh",
+    "srinagar": "Jammu and Kashmir", "jammu": "Jammu and Kashmir", "shimla": "Himachal Pradesh",
+    "dehradun": "Uttarakhand", "bhopal": "Madhya Pradesh", "indore": "Madhya Pradesh",
+    "jabalpur": "Madhya Pradesh", "raipur": "Chhattisgarh", "panaji": "Goa",
+    "kochi": "Kerala", "thiruvananthapuram": "Kerala", "vijayawada": "Andhra Pradesh",
+    "visakhapatnam": "Andhra Pradesh", "tirupati": "Andhra Pradesh",
+}
 
 
 def _stamp() -> str:
@@ -187,6 +209,10 @@ def parse_fm(parser: ArticleParser, page_url: str) -> list[dict]:
         if "radio stations by location" not in item["section"].casefold():
             continue
         city, state = _city_state(item["heading"])
+        if state == "India":
+            state = INDIAN_CITY_STATES.get(city.casefold(), state)
+        if city.casefold() == "national capital region":
+            state = "Delhi"
         if not city or city.casefold() in {"radio stations by location", "history", "content"}:
             continue
         # Each city list entry states its FM frequency directly; no cross-city
@@ -230,6 +256,8 @@ def parse_air(parser: ArticleParser, page_url: str) -> list[dict]:
             if place.casefold() in {"city", "frequency"}:
                 continue
             station_label, city, state = _normalize_air_city(place)
+            if state == "India":
+                state = INDIAN_CITY_STATES.get(city.casefold(), state)
             if not city or len(city) > 70:
                 continue
             for freq_khz, unit, raw in _frequency_tokens(freq_cell):
