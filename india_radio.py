@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 DB_PATH = schedule_db.DB_PATH
 FM_PAGE = "https://en.wikipedia.org/wiki/FM_broadcasting_in_India"
 AIR_PAGE = "https://en.wikipedia.org/wiki/All_India_Radio"
+BANGLADESH_PAGE = "https://en.wikipedia.org/wiki/Bangladesh_Betar"
 REST_HTML = "https://en.wikipedia.org/api/rest_v1/page/html/"
 API = "https://en.wikipedia.org/w/api.php"
 UA = "SWL-Band-Finder/1.0 (personal local radio catalogue)"
@@ -246,6 +247,42 @@ def parse_air(parser: ArticleParser, page_url: str) -> list[dict]:
     return records
 
 
+def parse_bangladesh_betar(parser: ArticleParser, page_url: str) -> list[dict]:
+    records = []
+    current_mode = ""
+    for row in parser.rows:
+        if row["section"].casefold() != "stations":
+            continue
+        cells = row["cells"]
+        if len(cells) >= 2 and "frequency" in cells[1].casefold():
+            current_mode = "FM" if "mhz" in cells[1].casefold() else "MW" if "khz" in cells[1].casefold() else ""
+            continue
+        if not current_mode or len(cells) < 2:
+            continue
+        center, frequency_text = _clean(cells[0]), _clean(cells[1])
+        if not center or not frequency_text:
+            continue
+        nums = re.findall(r"\d{2,4}(?:\.\d+)?", frequency_text)
+        for number_text in nums:
+            value = float(number_text)
+            freq_khz = value * 1000 if current_mode == "FM" else value
+            if current_mode == "FM" and not 65000 <= freq_khz <= 120000:
+                continue
+            if current_mode == "MW" and not 150 <= freq_khz <= 1800:
+                continue
+            if "," in center:
+                station_label, city = (part.strip() for part in center.split(",", 1))
+            else:
+                station_label = center
+                city = next((name for name in ("Dhaka", "Chittagong", "Rajshahi", "Khulna", "Rangpur", "Sylhet", "Barishal", "Thakurgaon", "Rangamati", "Cox's Bazar", "Bandarban", "Cumilla", "Gopalganj") if center.casefold().startswith(name.casefold())), "Dhaka")
+            details = " · ".join(x for x in ((f"{cells[3]} kW" if len(cells) > 3 and cells[3] else ""),
+                                              (cells[4] if len(cells) > 4 else "")) if x)
+            station = f"Bangladesh Betar · {station_label} · {city}"
+            records.append(_record(current_mode, station, city, "Bangladesh", freq_khz,
+                                   page_url, page_url, details))
+    return records
+
+
 def _city_coordinates(cities: list[str]) -> dict[str, tuple[float, float]]:
     if not cities:
         return {}
@@ -278,7 +315,9 @@ def _city_coordinates(cities: list[str]) -> dict[str, tuple[float, float]]:
 def refresh() -> dict:
     fm_parser, fm_url = _article("FM broadcasting in India")
     air_parser, air_url = _article("All India Radio")
-    records = parse_fm(fm_parser, fm_url) + parse_air(air_parser, air_url)
+    bd_parser, bd_url = _article("Bangladesh Betar")
+    fm_rows, air_rows, bd_rows = parse_fm(fm_parser, fm_url), parse_air(air_parser, air_url), parse_bangladesh_betar(bd_parser, bd_url)
+    records = fm_rows + air_rows + bd_rows
     # Keep the old cache intact if upstream structure changes or parsing fails.
     if len(records) < 10:
         raise RuntimeError(f"Wikipedia pages yielded only {len(records)} usable radio records; keeping prior catalogue")
@@ -304,13 +343,15 @@ def refresh() -> dict:
             (mode,record_key,station,city,state,frequency_khz,station_url,page_url,details,data_quality,lat,lon,updated_at)
             VALUES(:mode,:record_key,:station,:city,:state,:frequency_khz,:station_url,:page_url,:details,:data_quality,:lat,:lon,:updated_at)""",
             [dict(record, updated_at=now) for record in records])
-        for source_name, count, url in (("wikipedia.fm.india", len(parse_fm(fm_parser, fm_url)), fm_url),
-                                        ("wikipedia.air.india", len(parse_air(air_parser, air_url)), air_url)):
+        for source_name, count, url in (("wikipedia.fm.india", len(fm_rows), fm_url),
+                                        ("wikipedia.air.india", len(air_rows), air_url),
+                                        ("wikipedia.bangladesh.betar", len(bd_rows), bd_url)):
             db.execute("""INSERT INTO source_state(source,status,updated_at,row_count,message) VALUES(?,?,?,?,?)
                 ON CONFLICT(source) DO UPDATE SET status='ok',updated_at=excluded.updated_at,
                 row_count=excluded.row_count,message=excluded.message""",
                 (source_name, "ok", now, count, url))
-    return {"count": len(records), "updated_at": now}
+    return {"count": len(records), "updated_at": now,
+            "sources": {"fm_india": len(fm_rows), "air_india": len(air_rows), "bangladesh_betar": len(bd_rows)}}
 
 
 def search(mode: str, query: str = "") -> list[dict]:
@@ -344,7 +385,7 @@ def status() -> dict:
             updated = db.execute("SELECT MAX(updated_at) FROM india_radio").fetchone()[0]
         except sqlite3.OperationalError:
             count, updated = 0, ""
-    return {"count": count, "updated_at": updated or "", "sources": [FM_PAGE, AIR_PAGE]}
+    return {"count": count, "updated_at": updated or "", "sources": [FM_PAGE, AIR_PAGE, BANGLADESH_PAGE]}
 
 
 def needs_refresh(days: int = 7) -> bool:

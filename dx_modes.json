@@ -9,22 +9,22 @@
     },
     "mw": {
       "enabled": true,
-      "geography": "India · neighbouring-country feeds can be added later",
+      "geography": "India and nearby Bangladesh stations; other neighboring feeds can be added later",
       "receiver_country": "IN",
       "antenna_families": ["built-in ferrite", "passive tuned loop", "active loop"],
-      "seed_sources": ["https://en.wikipedia.org/wiki/All_India_Radio"]
+      "seed_sources": ["https://en.wikipedia.org/wiki/All_India_Radio", "https://en.wikipedia.org/wiki/Bangladesh_Betar"]
     },
     "fm": {
       "enabled": true,
-      "geography": "nearby Indian cities and states",
+      "geography": "nearby Indian cities/states and listed Bangladesh stations",
       "receiver_country": "IN",
       "antenna_families": ["whip", "dipole", "directional Yagi"],
-      "seed_sources": ["https://en.wikipedia.org/wiki/FM_broadcasting_in_India"]
+      "seed_sources": ["https://en.wikipedia.org/wiki/FM_broadcasting_in_India", "https://en.wikipedia.org/wiki/Bangladesh_Betar"]
     }
   },
   "notes": [
     "Wikipedia-derived MW/FM records are discovery seeds and may be outdated; verify on-air status and frequencies before relying on them.",
-    "India-only geography applies to MW/FM; shortwave remains international."
+    "India plus currently sourced nearby Bangladesh stations for MW/FM; shortwave remains international."
   ]
 }
 
