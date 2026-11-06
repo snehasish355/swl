@@ -9,6 +9,7 @@ only; query parameters are allow-listed and cannot select arbitrary URLs.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -31,6 +32,78 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 QUERY_KEYS = {"band", "freq", "station", "language", "txsite"}
+
+WEATHER_URL = "https://api.openweathermap.org/data/4.0/onecall/current"
+WEATHER_CACHE_SECONDS = 900
+weather_cache: dict[str, tuple[float, dict]] = {}
+weather_lock = threading.Lock()
+
+
+def load_local_env() -> None:
+    """Load simple KEY=VALUE settings without a third-party dotenv dependency."""
+    path = ROOT / ".env"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name, value = name.strip(), value.strip().strip("\"'")
+        if name and name not in os.environ:
+            os.environ[name] = value
+
+
+def fetch_weather(lat: float, lon: float) -> dict:
+    cache_key = f"{lat:.2f},{lon:.2f}"
+    now = time.time()
+    with weather_lock:
+        cached = weather_cache.get(cache_key)
+        if cached and now - cached[0] < WEATHER_CACHE_SECONDS:
+            return cached[1]
+    api_key = os.environ.get("OPENWEATHER_API_KEY", "").strip()
+    if not api_key or api_key.lower() in {"your_api_key_here", "add_your_key_here", "paste_your_api_key_here"}:
+        raise RuntimeError("Add your OpenWeather API key to .env as OPENWEATHER_API_KEY=your_key")
+    query = urllib.parse.urlencode({"lat": lat, "lon": lon, "units": "metric", "appid": api_key})
+    request = urllib.request.Request(WEATHER_URL + "?" + query, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise RuntimeError("OpenWeather rejected the key or One Call API 4.0 subscription. Check your account and key in .env") from None
+        raise RuntimeError(f"OpenWeather returned HTTP {exc.code}") from None
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        raise RuntimeError("Could not retrieve current weather from OpenWeather") from None
+    records = payload.get("data") or []
+    current = records[0] if isinstance(records, list) and records else records if isinstance(records, dict) else {}
+    conditions = current.get("weather") or []
+    condition = conditions[0] if conditions else {}
+    condition_id = condition.get("id")
+    result = {
+        "lat": round(lat, 2), "lon": round(lon, 2),
+        "observed_at": current.get("dt"),
+        "temperature_c": current.get("temp"),
+        "feels_like_c": current.get("feels_like"),
+        "humidity": current.get("humidity"),
+        "pressure_hpa": current.get("pressure"),
+        "wind_mps": current.get("wind_speed"),
+        "wind_deg": current.get("wind_deg"),
+        "visibility_m": current.get("visibility"),
+        "clouds_pct": current.get("clouds"),
+        "condition": condition.get("main", "Unknown"),
+        "description": condition.get("description", "Current conditions"),
+        "condition_id": condition_id,
+        "storm_noise_risk": isinstance(condition_id, int) and 200 <= condition_id < 300,
+    }
+    with weather_lock:
+        weather_cache[cache_key] = (now, result)
+    return result
+
+
+load_local_env()
 
 
 def clean(value: str) -> str:
@@ -231,6 +304,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": str(exc)})
             except Exception as exc:  # keep error responses useful to the UI
                 self.send_json(500, {"error": str(exc)})
+            return
+        if parsed.path == "/api/weather":
+            params = urllib.parse.parse_qs(parsed.query)
+            try:
+                lat, lon = float(params.get("lat", [""])[0]), float(params.get("lon", [""])[0])
+                if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+                    raise ValueError("Latitude or longitude is outside its valid range.")
+                self.send_json(200, fetch_weather(lat, lon))
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc) or "Enter valid receiver coordinates."})
+            except RuntimeError as exc:
+                self.send_json(503, {"error": str(exc)})
             return
         if parsed.path == "/api/status":
             state = schedule_db.status()

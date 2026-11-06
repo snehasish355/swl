@@ -13,6 +13,7 @@ The helper serves the page at `http://127.0.0.1:8765/` and opens it in your brow
 ## What it does
 
 - Estimates useful shortwave bands from local day/night, location, season, solar flux, K-index, and noise inputs, then blends propagation (58%) with a coarse antenna electrical-length/feed proxy (42%) for a separate overall ranking. It also labels the propagation-only and antenna-model picks.
+- Shows current local weather from OpenWeather when an API key is configured. Thunderstorms add a modest low-band reception/noise penalty; weather is not treated as an ionospheric propagation or signal-strength forecast.
 - Shows wire length in wavelengths by band and rule-of-thumb quarter-/half-wave lengths for the entered wire length. The antenna score is not an impedance, matching, or signal-strength calculation: layout, height, counterpoise/ground, receiver, and local noise matter. A 9:1 UnUn does not make every wire a perfect 50-ohm match.
 - Searches your local SQLite schedule database by broadcast band, frequency, station, language, or transmitter site. Matching Short-Wave.Info results are cached locally when available.
 - Converts schedule records into readable station cards with frequency, station, language, UTC hours and days, target area, transmitter power, site, country, coordinates, azimuth, distance, and source attribution.
@@ -32,4 +33,8 @@ The map uses OpenStreetMap tiles and requires an internet connection. Map tiles 
 
 The server binds only to `127.0.0.1` (this computer). The SQLite database stores public schedule rows locally and is ignored by Git. It has no login or app telemetry. The browser loads Leaflet from unpkg and OpenStreetMap tiles for map display.
 
+
+## OpenWeather setup
+
+Copy `.env.example` to `.env`, then set `OPENWEATHER_API_KEY` to your key. The `.env` file is ignored by Git; the browser calls the local Python helper, which keeps the key out of browser code and URLs. This integration uses OpenWeather One Call API 4.0, which requires the matching One Call subscription. Weather refreshes on startup, when receiver coordinates change, and every 15 minutes.
 

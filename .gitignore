@@ -3,4 +3,5 @@ __pycache__/
 .venv/
 
 schedule.sqlite3*
+.env
 
