@@ -1,0 +1,30 @@
+{
+  "default_receiver_country": "IN",
+  "modes": {
+    "sw": {
+      "enabled": true,
+      "geography": "international",
+      "schedule_sources": ["Shortwave.am", "Shortwave.live", "Short-Wave.Info"],
+      "antenna_families": ["random wire", "active loop", "shielded loop"]
+    },
+    "mw": {
+      "enabled": true,
+      "geography": "India · neighbouring-country feeds can be added later",
+      "receiver_country": "IN",
+      "antenna_families": ["built-in ferrite", "passive tuned loop", "active loop"],
+      "seed_sources": ["https://en.wikipedia.org/wiki/All_India_Radio"]
+    },
+    "fm": {
+      "enabled": true,
+      "geography": "nearby Indian cities and states",
+      "receiver_country": "IN",
+      "antenna_families": ["whip", "dipole", "directional Yagi"],
+      "seed_sources": ["https://en.wikipedia.org/wiki/FM_broadcasting_in_India"]
+    }
+  },
+  "notes": [
+    "Wikipedia-derived MW/FM records are discovery seeds and may be outdated; verify on-air status and frequencies before relying on them.",
+    "India-only geography applies to MW/FM; shortwave remains international."
+  ]
+}
+

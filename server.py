@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import schedule_db
+import india_radio
 
 HOST = "127.0.0.1"
 PORT = 9080
@@ -321,7 +322,31 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             state = schedule_db.status()
             state["refresh_running"] = refresh_running
+            state["radio_catalogue"] = india_radio.status()
             self.send_json(200, state)
+            return
+        if parsed.path == "/api/config":
+            try:
+                self.send_json(200, json.loads((ROOT / "dx_modes.json").read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                self.send_json(500, {"error": "dx_modes.json is missing or invalid"})
+            return
+        if parsed.path == "/api/radio":
+            params = urllib.parse.parse_qs(parsed.query)
+            mode = (params.get("mode", [""])[0] or "FM").upper()
+            query = params.get("q", [""])[0]
+            try:
+                mode_config = json.loads((ROOT / "dx_modes.json").read_text(encoding="utf-8"))
+                if not mode_config.get("modes", {}).get(mode.lower(), {}).get("enabled", False):
+                    self.send_json(403, {"error": f"{mode} mode is disabled in dx_modes.json"})
+                    return
+                rows = india_radio.search(mode, query)
+                self.send_json(200, {"mode": mode, "count": len(rows), "stations": rows,
+                                     "catalogue": india_radio.status(), "verified": False})
+            except (OSError, json.JSONDecodeError) as exc:
+                self.send_json(500, {"error": "Could not read mode settings."})
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
             return
         self.send_error(404)
 
@@ -330,6 +355,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/update":
             started = start_refresh()
             self.send_json(202, {"running": refresh_running, "started": started, "status": schedule_db.status()})
+            return
+        if parsed.path == "/api/radio/update":
+            started = start_refresh()
+            self.send_json(202, {"running": refresh_running, "started": started,
+                                 "catalogue": india_radio.status()})
             return
         if parsed.path == "/api/shutdown":
             self.send_json(200, {"stopping": True})
@@ -345,7 +375,14 @@ refresh_running = False
 def refresh_worker() -> None:
     global refresh_running
     try:
-        schedule_db.update_full_sources()
+        try:
+            schedule_db.update_full_sources()
+        except Exception as exc:
+            schedule_db.record_failure("shortwave.am", str(exc))
+        try:
+            india_radio.refresh()
+        except Exception as exc:
+            schedule_db.record_failure("wikipedia.india.radio", str(exc))
     finally:
         with refresh_lock:
             refresh_running = False
@@ -367,7 +404,7 @@ def main() -> None:
     server.daemon_threads = True
     print(f"SWL Band Finder is running at http://{HOST}:{PORT}/")
     print("Keep this window open while using the app. Press Ctrl+C to stop.")
-    if not schedule_db.full_sources_are_fresh():
+    if not schedule_db.full_sources_are_fresh() or india_radio.needs_refresh():
         start_refresh()
     threading.Timer(1.0, lambda: webbrowser.open(f"http://{HOST}:{PORT}/")).start()
     try:

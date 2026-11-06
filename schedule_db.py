@@ -21,6 +21,14 @@ SHORTWAVE_LIVE = "https://shortwave.live/freq"
 INFO_HOST = "https://www.short-wave.info/index.php"
 FULL_FEEDS = ("shortwave.am", "shortwave.live")
 QUERY_KEYS = {"band", "freq", "station", "language", "txsite"}
+VERIFIED_STATION_ALIASES = (
+    ("AIR Akashvani Ext.Sce", "All India Radio (Akashvani) External Services",
+     "https://prasarbharati.gov.in/en/akashvani/"),
+    ("Akashvani Ext.Sce", "All India Radio (Akashvani) External Services",
+     "https://prasarbharati.gov.in/en/akashvani/"),
+    ("AIR Akashvani External Service", "All India Radio (Akashvani) External Services",
+     "https://prasarbharati.gov.in/en/akashvani/"),
+)
 
 
 def utc_now() -> dt.datetime:
@@ -79,7 +87,21 @@ def init_db() -> None:
                 succeeded_at TEXT DEFAULT '',
                 message TEXT DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS station_name_aliases (
+                raw_name_key TEXT PRIMARY KEY,
+                raw_name TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                evidence_url TEXT NOT NULL,
+                verified INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
         """)
+        for raw_name, display_name, evidence_url in VERIFIED_STATION_ALIASES:
+            raw_key = re.sub(r"[^a-z0-9]+", "", raw_name.lower())
+            db.execute("""INSERT OR IGNORE INTO station_name_aliases
+                       (raw_name_key,raw_name,display_name,evidence_url,verified,updated_at)
+                       VALUES(?,?,?,?,1,?)""",
+                       (raw_key, raw_name, display_name, evidence_url, utc_stamp()))
 
 
 def number(value):
@@ -393,6 +415,7 @@ def finish_info_query(query_key: str, error: str = "") -> None:
 
 def query_schedule(params: dict[str, str]) -> list[dict]:
     """Read matching rows only from the local database."""
+    init_db()
     query = {k: v.strip() for k, v in params.items() if k in {"band", "freq", "station", "language", "txsite"} and v.strip()}
     if len(query) != 1:
         raise ValueError("Choose exactly one search: band, frequency, station, language, or transmitter site.")
@@ -410,7 +433,10 @@ def query_schedule(params: dict[str, str]) -> list[dict]:
         tol = 5 if params.get("porm") == "5" else 0.05
         clauses.append("frequency_khz BETWEEN ? AND ?"); values.extend([freq-tol, freq+tol])
     elif "station" in query:
-        clauses.append("station LIKE ? COLLATE NOCASE"); values.append("%"+query["station"][:120]+"%")
+        clauses.append("(station LIKE ? COLLATE NOCASE OR raw_json LIKE ? COLLATE NOCASE OR station IN "
+                       "(SELECT raw_name FROM station_name_aliases WHERE display_name LIKE ? COLLATE NOCASE AND verified=1))")
+        values.extend(["%"+query["station"][:120]+"%", "%"+query["station"][:120]+"%",
+                       "%"+query["station"][:120]+"%"])
     elif "language" in query:
         clauses.append("language LIKE ? COLLATE NOCASE"); values.append("%"+query["language"][:120]+"%")
     elif "txsite" in query:
@@ -488,9 +514,19 @@ def combine_records(rows: list[dict]) -> list[dict]:
                 if row.get(key) not in (None, "", "?"):
                     match[key] = row[key]
         match["on_air"] = bool(match.get("on_air") or row.get("on_air"))
+    with connect() as db:
+        aliases = {row["raw_name_key"]: dict(row) for row in db.execute(
+            "SELECT raw_name_key,raw_name,display_name,evidence_url FROM station_name_aliases WHERE verified=1")}
     for group in groups:
         group["on_air"] = bool(group.get("on_air"))
         group["source"] = " + ".join(dict.fromkeys(group.pop("source_names")))
+        raw_name = group.get("station", "")
+        alias = aliases.get(re.sub(r"[^a-z0-9]+", "", raw_name.lower()))
+        if alias:
+            group["station_source_label"] = raw_name
+            group["station"] = alias["display_name"]
+            group["station_name_source_url"] = alias["evidence_url"]
+            group["station_name_verified"] = True
     return groups
 
 

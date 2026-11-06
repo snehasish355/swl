@@ -1,0 +1,359 @@
+"""Wikipedia-derived India MW/FM/SW station catalogue.
+
+This is a discovery/seed catalogue, not a verified on-air schedule. Every
+record retains the article and (when available) the linked station article.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import html
+import json
+import re
+import sqlite3
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+from pathlib import Path
+
+import schedule_db
+
+ROOT = Path(__file__).resolve().parent
+DB_PATH = schedule_db.DB_PATH
+FM_PAGE = "https://en.wikipedia.org/wiki/FM_broadcasting_in_India"
+AIR_PAGE = "https://en.wikipedia.org/wiki/All_India_Radio"
+REST_HTML = "https://en.wikipedia.org/api/rest_v1/page/html/"
+API = "https://en.wikipedia.org/w/api.php"
+UA = "SWL-Band-Finder/1.0 (personal local radio catalogue)"
+
+
+def _stamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _clean(value: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+class ArticleParser(HTMLParser):
+    """Collect city list items and regional frequency table cells."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.heading_tag = ""
+        self.heading_text = []
+        self.section = ""
+        self.subsection = ""
+        self.li_depth = 0
+        self.li_text: list[str] = []
+        self.li_links: list[tuple[str, str]] = []
+        self.link_depth = 0
+        self.link_text: list[str] = []
+        self.link_href = ""
+        self.in_tr = False
+        self.in_cell = False
+        self.cell_text: list[str] = []
+        self.cells: list[str] = []
+        self.rows: list[dict] = []
+        self.items: list[dict] = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag in ("h2", "h3", "h4", "h5", "h6"):
+            self.heading_tag, self.heading_text = tag, []
+        elif tag == "li":
+            if self.li_depth == 0:
+                self.li_text, self.li_links = [], []
+            self.li_depth += 1
+        elif tag == "a" and self.li_depth:
+            self.link_depth += 1
+            self.link_text, self.link_href = [], attrs.get("href", "")
+        elif tag == "tr":
+            self.in_tr, self.cells = True, []
+        elif tag in ("th", "td") and self.in_tr:
+            self.in_cell, self.cell_text = True, []
+
+    def handle_endtag(self, tag):
+        if tag == self.heading_tag and self.heading_tag:
+            heading = _clean("".join(self.heading_text))
+            if self.heading_tag == "h2":
+                self.section = heading
+                self.subsection = ""
+            else:
+                self.subsection = heading
+            self.heading_tag = ""
+        elif tag == "a" and self.link_depth:
+            label = _clean("".join(self.link_text))
+            if label and self.link_href:
+                self.li_links.append((label, self.link_href))
+            self.link_depth -= 1
+        elif tag == "li" and self.li_depth:
+            self.li_depth -= 1
+            if self.li_depth == 0:
+                text = _clean("".join(self.li_text))
+                if text:
+                    self.items.append({"section": self.section, "heading": self.subsection,
+                                       "text": text, "links": self.li_links[:]})
+        elif tag in ("th", "td") and self.in_cell:
+            self.cells.append(_clean("".join(self.cell_text)))
+            self.in_cell = False
+        elif tag == "tr" and self.in_tr:
+            if self.cells:
+                self.rows.append({"section": self.section, "heading": self.subsection,
+                                  "cells": self.cells[:]})
+            self.in_tr = False
+
+    def handle_data(self, data):
+        if self.heading_tag:
+            self.heading_text.append(data)
+        if self.li_depth:
+            self.li_text.append(data)
+            if self.link_depth:
+                self.link_text.append(data)
+        if self.in_cell:
+            self.cell_text.append(data)
+
+
+def _get(url: str) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html, application/json"})
+    with urllib.request.urlopen(request, timeout=25) as response:
+        data = response.read(16_000_001)
+    if len(data) > 16_000_000:
+        raise RuntimeError("Wikipedia response exceeded 16 MB")
+    return data
+
+
+def _article(title: str) -> tuple[ArticleParser, str]:
+    url = REST_HTML + urllib.parse.quote(title.replace(" ", "_"), safe="_")
+    parser = ArticleParser()
+    parser.feed(_get(url).decode("utf-8", "replace"))
+    return parser, "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"), safe="_()")
+
+
+FREQ_RE = re.compile(r"(?i)(?:\bFM\s*)?(\d{2,5}(?:\.\d+)?)\s*(kHz|MHz)\b")
+
+
+def _station_link(links: list[tuple[str, str]], station: str) -> str:
+    candidates = []
+    for label, href in links:
+        if href.startswith("/wiki/") and not href.startswith("/wiki/File:"):
+            if label.casefold() not in {"radio", "fm", "mw", "edit", "listen", "yes"}:
+                candidates.append("https://en.wikipedia.org" + href)
+    if candidates:
+        return candidates[0]
+    slug = urllib.parse.quote(station.strip().replace(" ", "_"), safe="_")
+    return "https://en.wikipedia.org/wiki/" + slug
+
+
+def _record(mode: str, station: str, city: str, state: str, freq_khz: float,
+            station_url: str, page_url: str, details: str = "") -> dict:
+    identity = "|".join((mode, station.casefold(), city.casefold(), f"{freq_khz:.3f}"))
+    key = hashlib.sha1(identity.encode()).hexdigest()
+    return {"mode": mode, "record_key": key, "station": station, "city": city,
+            "state": state, "frequency_khz": round(freq_khz, 3), "station_url": station_url,
+            "page_url": page_url, "details": details, "data_quality": "Wikipedia seed · verify on air"}
+
+
+def _city_state(heading: str) -> tuple[str, str]:
+    heading = _clean(re.sub(r"\[.*?\]", "", heading))
+    if "," in heading:
+        city, state = (part.strip() for part in heading.split(",", 1))
+        return city, state
+    return heading, "India"
+
+
+def _normalize_air_city(place: str) -> tuple[str, str, str]:
+    """Return (station/site label, listening city, state) for AIR table cells."""
+    label = _clean(place.split("(", 1)[0])
+    # Several AIR table entries name the service/transmitter first and put its
+    # city in parentheses, e.g. Gitanjali (Kolkata A), Sanchayita (Kolkata B).
+    for match in re.finditer(r"\(([^()]*)\)", place):
+        nested_city = re.match(r"\s*([A-Za-z .'-]+?)(?:\s+[A-D])?\s*$", match.group(1))
+        if nested_city and nested_city.group(1).casefold() in {
+            "kolkata", "mumbai", "delhi", "chennai", "bengaluru", "hyderabad",
+            "ahmedabad", "lucknow", "jaipur", "patna", "ranchi", "bhopal",
+            "guwahati", "chandigarh", "srinagar", "jalandhar", "nagpur", "pune",
+        }:
+            city, state = _city_state(nested_city.group(1))
+            return label, city, state
+    city, state = _city_state(label)
+    city = re.sub(r"\s+[A-D]$", "", city).strip()
+    return label, city, state
+
+
+def parse_fm(parser: ArticleParser, page_url: str) -> list[dict]:
+    records = []
+    for item in parser.items:
+        if "radio stations by location" not in item["section"].casefold():
+            continue
+        city, state = _city_state(item["heading"])
+        if not city or city.casefold() in {"radio stations by location", "history", "content"}:
+            continue
+        # Each city list entry states its FM frequency directly; no cross-city
+        # assignment is made from national multi-frequency summaries.
+        matches = list(FREQ_RE.finditer(item["text"]))
+        if not matches:
+            continue
+        station_text = item["text"].split("(", 1)[0].strip(" ·–—:-")
+        station_text = re.sub(r"^Radio\s+", "", station_text, flags=re.I).strip()
+        if not station_text:
+            station_text = item["links"][-1][0] if item["links"] else "Unnamed FM station"
+        station_url = _station_link(item["links"], station_text)
+        for match in matches:
+            freq_khz = float(match.group(1)) * 1000
+            records.append(_record("FM", station_text, city, state, freq_khz,
+                                   station_url, page_url, item["text"]))
+    return records
+
+
+def _frequency_tokens(text: str) -> list[tuple[float, str, str]]:
+    matches = list(FREQ_RE.finditer(text))
+    out = [(float(m.group(1)) * (1000 if m.group(2).lower() == "mhz" else 1),
+            m.group(2).lower(), m.group(0)) for m in matches]
+    # Most regional MW table cells contain only a bare kHz value.
+    if not out:
+        bare = _clean(text).replace(",", " ")
+        if re.fullmatch(r"\d{3,4}(?:\s+\d{3,4})*", bare):
+            out = [(float(x), "khz", x) for x in bare.split()]
+    return out
+
+
+def parse_air(parser: ArticleParser, page_url: str) -> list[dict]:
+    records = []
+    for row in parser.rows:
+        if "regional service" not in (row["section"] + " " + row["heading"]).casefold():
+            continue
+        cells = [c for c in row["cells"] if c]
+        # Regional-service tables repeat City / Frequency column pairs.
+        for idx in range(0, len(cells) - 1, 2):
+            place, freq_cell = cells[idx], cells[idx + 1]
+            if place.casefold() in {"city", "frequency"}:
+                continue
+            station_label, city, state = _normalize_air_city(place)
+            if not city or len(city) > 70:
+                continue
+            for freq_khz, unit, raw in _frequency_tokens(freq_cell):
+                if unit == "mhz" or "fm" in raw.lower():
+                    mode = "FM"
+                elif 2200 <= freq_khz <= 30000:
+                    mode = "SW"
+                elif 150 <= freq_khz <= 1800:
+                    mode = "MW"
+                else:
+                    continue
+                records.append(_record(mode, f"Akashvani {station_label}", city, state,
+                                       freq_khz, page_url,
+                                       page_url, f"{row['heading']} · {freq_cell}"))
+    return records
+
+
+def _city_coordinates(cities: list[str]) -> dict[str, tuple[float, float]]:
+    if not cities:
+        return {}
+    out = {}
+    for offset in range(0, len(cities), 50):
+        batch = cities[offset:offset + 50]
+        params = urllib.parse.urlencode({"action": "query", "prop": "coordinates", "titles": "|".join(batch),
+                                        "format": "json", "colimit": "50", "coprop": "primary"})
+        try:
+            payload = json.loads(_get(API + "?" + params).decode("utf-8"))
+            aliases = {}
+            query = payload.get("query", {})
+            for item in query.get("normalized", []) + query.get("redirects", []):
+                aliases[item.get("from", "").casefold()] = item.get("to", "").casefold()
+            batch_coords = {}
+            for page in query.get("pages", {}).values():
+                coords = page.get("coordinates") or []
+                if coords:
+                    batch_coords[page.get("title", "").casefold()] = (coords[0]["lat"], coords[0]["lon"])
+            out.update(batch_coords)
+            for city in batch:
+                resolved = aliases.get(city.casefold(), city.casefold())
+                if resolved in batch_coords:
+                    out[city.casefold()] = batch_coords[resolved]
+        except Exception:
+            continue
+    return out
+
+
+def refresh() -> dict:
+    fm_parser, fm_url = _article("FM broadcasting in India")
+    air_parser, air_url = _article("All India Radio")
+    records = parse_fm(fm_parser, fm_url) + parse_air(air_parser, air_url)
+    # Keep the old cache intact if upstream structure changes or parsing fails.
+    if len(records) < 10:
+        raise RuntimeError(f"Wikipedia pages yielded only {len(records)} usable radio records; keeping prior catalogue")
+    cities = sorted({r["city"] for r in records})
+    coords = _city_coordinates(cities)
+    for record in records:
+        found = coords.get(record["city"].casefold())
+        if found:
+            record["lat"], record["lon"] = found
+        else:
+            record["lat"], record["lon"] = None, None
+    now = _stamp()
+    with schedule_db.connect() as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS india_radio (
+            mode TEXT NOT NULL, record_key TEXT NOT NULL, station TEXT NOT NULL,
+            city TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'India',
+            frequency_khz REAL NOT NULL, station_url TEXT NOT NULL DEFAULT '',
+            page_url TEXT NOT NULL, details TEXT NOT NULL DEFAULT '',
+            data_quality TEXT NOT NULL, lat REAL, lon REAL, updated_at TEXT NOT NULL,
+            PRIMARY KEY(mode, record_key))""")
+        db.execute("DELETE FROM india_radio")
+        db.executemany("""INSERT INTO india_radio
+            (mode,record_key,station,city,state,frequency_khz,station_url,page_url,details,data_quality,lat,lon,updated_at)
+            VALUES(:mode,:record_key,:station,:city,:state,:frequency_khz,:station_url,:page_url,:details,:data_quality,:lat,:lon,:updated_at)""",
+            [dict(record, updated_at=now) for record in records])
+        for source_name, count, url in (("wikipedia.fm.india", len(parse_fm(fm_parser, fm_url)), fm_url),
+                                        ("wikipedia.air.india", len(parse_air(air_parser, air_url)), air_url)):
+            db.execute("""INSERT INTO source_state(source,status,updated_at,row_count,message) VALUES(?,?,?,?,?)
+                ON CONFLICT(source) DO UPDATE SET status='ok',updated_at=excluded.updated_at,
+                row_count=excluded.row_count,message=excluded.message""",
+                (source_name, "ok", now, count, url))
+    return {"count": len(records), "updated_at": now}
+
+
+def search(mode: str, query: str = "") -> list[dict]:
+    mode = mode.upper()
+    if mode not in {"FM", "MW", "SW"}:
+        raise ValueError("Mode must be FM, MW, or SW")
+    like = f"%{query.strip()}%"
+    with schedule_db.connect() as db:
+        try:
+            rows = db.execute("""SELECT * FROM india_radio WHERE mode=? AND
+                (?='' OR station LIKE ? COLLATE NOCASE OR city LIKE ? COLLATE NOCASE OR
+                 state LIKE ? COLLATE NOCASE OR CAST(frequency_khz AS TEXT) LIKE ? OR
+                 CAST(frequency_khz/1000.0 AS TEXT) LIKE ?)
+                ORDER BY city COLLATE NOCASE, frequency_khz, station COLLATE NOCASE LIMIT 500""",
+                (mode, query.strip(), like, like, like, like, like)).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    results = []
+    for row in rows:
+        result = dict(row)
+        result["frequency_display"] = (f"{row['frequency_khz']/1000:g} MHz" if mode == "FM"
+                                       else f"{row['frequency_khz']:g} kHz")
+        results.append(result)
+    return results
+
+
+def status() -> dict:
+    with schedule_db.connect() as db:
+        try:
+            count = db.execute("SELECT COUNT(*) FROM india_radio").fetchone()[0]
+            updated = db.execute("SELECT MAX(updated_at) FROM india_radio").fetchone()[0]
+        except sqlite3.OperationalError:
+            count, updated = 0, ""
+    return {"count": count, "updated_at": updated or "", "sources": [FM_PAGE, AIR_PAGE]}
+
+
+def needs_refresh(days: int = 7) -> bool:
+    current = status()
+    if not current["count"] or not current["updated_at"]:
+        return True
+    try:
+        updated = dt.datetime.fromisoformat(current["updated_at"])
+        return dt.datetime.now(dt.timezone.utc) - updated > dt.timedelta(days=days)
+    except ValueError:
+        return True
+
