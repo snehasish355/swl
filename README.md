@@ -12,10 +12,11 @@ The helper serves the page at `http://127.0.0.1:8765/` and opens it in your brow
 
 ## What it does
 
-- Estimates useful shortwave bands from local day/night, location, season, solar flux, K-index, and noise inputs.
-- Shows antenna electrical length and an approximate resonance for your wire length, counterpoise, and feed choice (direct high-Z, direct 50 ohm, or 9:1 UnUn).
+- Estimates useful shortwave bands from local day/night, location, season, solar flux, K-index, and noise inputs, then blends propagation (58%) with a coarse antenna electrical-length/feed proxy (42%) for a separate overall ranking. It also labels the propagation-only and antenna-model picks.
+- Shows wire length in wavelengths by band and rule-of-thumb quarter-/half-wave lengths for the entered wire length. The antenna score is not an impedance, matching, or signal-strength calculation: layout, height, counterpoise/ground, receiver, and local noise matter. A 9:1 UnUn does not make every wire a perfect 50-ohm match.
 - Searches your local SQLite schedule database by broadcast band, frequency, station, language, or transmitter site. Matching Short-Wave.Info results are cached locally when available.
 - Converts schedule records into readable station cards with frequency, station, language, UTC hours and days, target area, transmitter power, site, country, coordinates, azimuth, distance, and source attribution.
+- Shows a flag and transmitter/relay country when the schedule source identifies it. This is the transmitting site’s country and may differ from the broadcaster’s home country.
 - Calculates the initial bearing from each transmitter to the listener and compares it with the listed transmit azimuth.
 - Filters schedule cards by transmitter country, on-air status, and whether the listed beam azimuth is within the assumed width toward your location. The shortlist is a useful starting point, not a reception guarantee.
 - Shows a selectable, adjustable-width directional sector and great-circle path for each transmitter with coordinates; the sector appears only when the source provides a directional azimuth.

@@ -428,6 +428,15 @@ def _norm(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
+def _norm_language(value: str) -> str:
+    text = _norm(value)
+    aliases = {
+        "standardarabic": "arabic", "modernstandardarabic": "arabic",
+        "iranianpersian": "persian", "farsi": "persian",
+    }
+    return aliases.get(text, text)
+
+
 def _sites_match(a: dict, b: dict) -> bool:
     if all(a.get(k) is not None and b.get(k) is not None for k in ("lat", "lon")):
         from math import asin, cos, radians, sin, sqrt
@@ -451,7 +460,7 @@ def combine_records(rows: list[dict]) -> list[dict]:
     groups: list[dict] = []
     index: dict[tuple, list[dict]] = {}
     for row in rows:
-        core = (round(float(row["frequency_khz"]), 1), _norm(row["station"]), row["start_utc"], row["end_utc"], _norm(row["language"]))
+        core = (round(float(row["frequency_khz"]), 1), _norm(row["station"]), row["start_utc"], row["end_utc"], _norm_language(row["language"]))
         candidates = index.setdefault(core, [])
         target = _norm(row.get("target", ""))
         match = None
@@ -474,6 +483,10 @@ def combine_records(rows: list[dict]) -> list[dict]:
         for key in ("site", "language", "target", "days", "power_kw", "azimuth", "lat", "lon", "country_code", "source_url"):
             if match.get(key) in (None, "", "?") and row.get(key) not in (None, "", "?"):
                 match[key] = row[key]
+        if row["source"] == "shortwave.live":
+            for key in ("site", "language", "target", "days", "country_code"):
+                if row.get(key) not in (None, "", "?"):
+                    match[key] = row[key]
         match["on_air"] = bool(match.get("on_air") or row.get("on_air"))
     for group in groups:
         group["on_air"] = bool(group.get("on_air"))
